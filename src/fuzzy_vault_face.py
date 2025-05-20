@@ -23,7 +23,7 @@ def load_config(config_file="config.ini"):
     }
     config['FuzzyVault'] = {
         'field_size': '65537',
-        'polynomial_degree': '50',
+        'polynomial_degree': '0.33',  # Može biti postotak (npr. 0.33) ili fiksni broj
         'n_chaff': '5120',
         'max_unlock_attempts': '100'
     }
@@ -34,17 +34,15 @@ def load_config(config_file="config.ini"):
     
     # Pokušaj učitati konfiguraciju iz datoteke
     if os.path.exists(config_file):
-        with open(config_file, 'r', encoding='utf-8') as f:  # Dodaj encoding
+        with open(config_file, 'r', encoding='utf-8') as f:
             config.read_file(f)
         print(f"Konfiguracija učitana iz {config_file}")
     else:
-        # Ako datoteka ne postoji, kreiraj je sa zadanim vrijednostima
-        with open(config_file, 'w', encoding='utf-8') as f:  # Dodaj encoding
+        with open(config_file, 'w', encoding='utf-8') as f:
             config.write(f)
         print(f"Kreirana nova config.ini datoteka sa zadanim vrijednostima")
     
     return config
-
 
 def get_directory_hash(directory):
     """Generira hash za sve datoteke u direktoriju (ime + vrijeme izmjene)"""
@@ -77,8 +75,7 @@ class FaceFeatureExtractor:
         
         if not faces:
             raise ValueError("Nije detektirano lice na slici.")
-        embedding = faces[0].embedding
-        return embedding[:self.num_features]
+        return faces[0].embedding[:self.num_features]
 
 class FeatureTransformer:
     def __init__(self, config=None):
@@ -152,18 +149,24 @@ class FuzzyVault:
             config = load_config()
         
         self.field_size = int(config['FuzzyVault']['field_size'])
-        self.polynomial_degree = int(config['FuzzyVault']['polynomial_degree'])
         self.n_chaff = int(config['FuzzyVault']['n_chaff'])
         self.max_unlock_attempts = int(config['FuzzyVault']['max_unlock_attempts'])
-        
         self.X = symbols('X')
         self.interrupted = False
+        
+        poly_degree_config = config['FuzzyVault']['polynomial_degree']
+        if '.' in poly_degree_config:
+            self.poly_degree_ratio = float(poly_degree_config)
+            self.polynomial_degree = None
+        else:
+            self.polynomial_degree = int(poly_degree_config)
+            self.poly_degree_ratio = None
 
     def _handle_interrupt(self, signum, frame):
         self.interrupted = True
 
-    def _create_random_polynomial(self):
-        coeffs = [random.randint(0, self.field_size-1) for _ in range(self.polynomial_degree)]
+    def _create_random_polynomial(self, degree):
+        coeffs = [random.randint(0, self.field_size-1) for _ in range(degree + 1)]
         while coeffs[0] == 0:
             coeffs[0] = random.randint(1, self.field_size-1)
         return Poly(coeffs, self.X)
@@ -178,7 +181,11 @@ class FuzzyVault:
         return lambda x: perm[x % self.field_size]
 
     def lock(self, feature_set, key=None):
-        poly = self._create_random_polynomial() if key is None else Poly(key, self.X)
+        if self.poly_degree_ratio is not None:
+            n_genuine = len(feature_set)
+            self.polynomial_degree = max(1, int(n_genuine * self.poly_degree_ratio))
+        
+        poly = self._create_random_polynomial(self.polynomial_degree) if key is None else Poly(key, self.X)
         hash_value = self._hash_polynomial(poly)
         bijection = self._generate_bijection(hash_value)
         
@@ -205,12 +212,10 @@ class FuzzyVault:
         print(f"- Hash vrijednost: {hash_value[:16]}...{hash_value[-16:]}")
         print(f"- Stupanj polinoma: {self.polynomial_degree}")
         
-        return (vault_points, hash_value, poly.all_coeffs())
+        return (vault_points, hash_value, self.polynomial_degree)
 
-    def unlock(self, vault_points, feature_set, hash_value, max_attempts=None):
-        max_attempts = max_attempts or self.max_unlock_attempts
+    def unlock(self, vault_points, feature_set, hash_value, poly_degree):
         signal.signal(signal.SIGINT, self._handle_interrupt)
-        
         bijection = self._generate_bijection(hash_value)
         transformed_set = [bijection(x) for x in feature_set]
         
@@ -220,18 +225,18 @@ class FuzzyVault:
                 if vx == x:
                     candidate_points.append((vx, vy))
         
-        for attempt in range(max_attempts):
+        for attempt in range(self.max_unlock_attempts):
             if self.interrupted:
                 print("\nPrekinuto korisnikom!")
                 return None
             
-            print(f"\rPokušaj {attempt+1}/{max_attempts}...", end="")
+            print(f"\rPokušaj {attempt+1}/{self.max_unlock_attempts}...", end="")
             
-            if len(candidate_points) < self.polynomial_degree:
+            if len(candidate_points) < poly_degree + 1:
                 continue
                 
             try:
-                points = random.sample(candidate_points, self.polynomial_degree)
+                points = random.sample(candidate_points, poly_degree + 1)
                 interp_poly = Poly(0, self.X)
                 
                 for i, (xi, yi) in enumerate(points):
@@ -311,11 +316,11 @@ class BiometricTemplateProtectionSystem:
         feature_set = self.feature_transformer.transform(features)
         return self.fuzzy_vault.lock(feature_set)
 
-    def verify(self, image_path, vault_data, hash_value):
+    def verify(self, image_path, vault_data, hash_value, poly_degree):
         print(f"\nPokrećem verifikaciju za: {os.path.basename(image_path)}")
         features = self.feature_extractor.extract_features(image_path)
         feature_set = self.feature_transformer.transform(features)
-        return self.fuzzy_vault.unlock(vault_data, feature_set, hash_value)
+        return self.fuzzy_vault.unlock(vault_data, feature_set, hash_value, poly_degree)
 
     def save(self, filename):
         with open(filename, "wb") as f:
@@ -327,7 +332,6 @@ class BiometricTemplateProtectionSystem:
         self.is_trained = True
 
 def main():
-    # Učitaj konfiguraciju
     config = load_config()
     
     training_dir = './data/training'
@@ -335,7 +339,6 @@ def main():
     probe_dir = './data/probe'
 
     try:
-        # Pokušaj učitati postojeći model
         with open("training_state.pkl", "rb") as f:
             saved_hash, feature_transformer = pickle.load(f)
             system = BiometricTemplateProtectionSystem(config)
@@ -344,15 +347,12 @@ def main():
             system.is_trained = True
             print("\nUčitavanje postojećeg modela...")
     except FileNotFoundError:
-        # Kreiraj novi sustav ako nema spremljenog modela
         system = BiometricTemplateProtectionSystem(config)
 
-    # Treniraj sustav (samo ako ima promjena)
     training_images = [os.path.join(training_dir, f) for f in os.listdir(training_dir) 
                       if f.lower().endswith(('.jpg', '.png'))]
     system.train(training_images)
 
-    # Registracija korisnika
     enrollments = {}
     gallery_images = [os.path.join(gallery_dir, f) for f in os.listdir(gallery_dir) 
                      if f.lower().endswith(('.jpg', '.png'))]
@@ -360,13 +360,12 @@ def main():
     for img_path in gallery_images:
         user_id = os.path.splitext(os.path.basename(img_path))[0]
         try:
-            vault_data, hash_val, _ = system.enroll(img_path)
-            enrollments[user_id] = (vault_data, hash_val)
+            vault_data, hash_val, poly_degree = system.enroll(img_path)
+            enrollments[user_id] = (vault_data, hash_val, poly_degree)
             print(f"Registriran korisnik: {user_id}")
         except Exception as e:
             print(f"Greška pri registraciji {user_id}: {str(e)}")
 
-    # Evaluacija
     true_positives = 0
     false_positives = 0
     true_negatives = 0
@@ -378,9 +377,8 @@ def main():
     for probe_path in probe_images:
         user_id = os.path.splitext(os.path.basename(probe_path))[0].split('_')[0]
         try:
-            for enrolled_id, (vault_data, hash_val) in enrollments.items():
-                key = system.verify(probe_path, vault_data, hash_val)
-                success = key is not None
+            for enrolled_id, (vault_data, hash_val, poly_degree) in enrollments.items():
+                success = system.verify(probe_path, vault_data, hash_val, poly_degree)
                 
                 if success:
                     if user_id == enrolled_id:
@@ -398,7 +396,6 @@ def main():
         except Exception as e:
             print(f"Greška pri verifikaciji {probe_path}: {str(e)}")
 
-    # Evaluacijske metrike
     total_tests = true_positives + false_positives + true_negatives + false_negatives
     if total_tests > 0:
         print("\nRezultati evaluacije:")
