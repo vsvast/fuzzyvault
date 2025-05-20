@@ -1,0 +1,18 @@
+# Ignoriši virtualno okruženje
+.venv/
+
+# Ignoriši modele i arhive koji su preveliki ili se skidaju automatski
+weights/models/buffalo_l/
+weights/models/buffalo_l.zip
+
+# Python cache fajlovi
+__pycache__/
+*.py[cod]
+
+# Editor fajlovi
+.vscode/
+*.swp
+
+# OS-specifični fajlovi
+.DS_Store
+Thumbs.db

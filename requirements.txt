@@ -1,0 +1,7 @@
+numpy
+opencv-python
+arcface
+dlib
+sympy
+scikit-learn
+astropy
